@@ -387,7 +387,20 @@ export const usePuterStore = create<PuterStore>((set, get) => {
       setError("Puter.js not available");
       return;
     }
-    return puter.kv.delete(key);
+    // Workaround: Puter.js delete function may not be implemented
+    // Try to delete, if it fails, set to null as a fallback
+    try {
+      if (typeof puter.kv.delete === 'function') {
+        return await puter.kv.delete(key);
+      } else {
+        // Fallback: set value to null to effectively "delete" it
+        console.warn("puter.kv.delete not available, using set(null) as fallback");
+        return await puter.kv.set(key, "");
+      }
+    } catch (error) {
+      console.warn("KV delete failed, trying fallback:", error);
+      return await puter.kv.set(key, "");
+    }
   };
 
   const listKV = async (pattern: string, returnValues?: boolean) => {

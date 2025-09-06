@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import { usePuterStore } from "~/lib/puter";
 import Navbar from "~/components/Navbar";
 import type { Route } from "./+types/wipe";
+import { LucideTrash, LucideCheck, LucideSquare, LucideTrash2 } from "lucide-react";
 
 export function meta({}: Route.MetaArgs) {
     return [
@@ -36,21 +37,41 @@ const WipeApp = () => {
         setLoadingResumes(true);
         try {
             const resumeKVItems = (await kv.list("resume:*", true)) as KVItem[];
-            const parsedResumes = resumeKVItems?.map((item) => {
-                const resume = JSON.parse(item.value) as Resume;
-                return {
-                    id: resume.id,
-                    name: `${resume.companyName || "Resume"} - ${resume.jobTitle || "Application"}`,
-                    companyName: resume.companyName,
-                    jobTitle: resume.jobTitle,
-                    imagePath: resume.imagePath,
-                    resumePath: resume.resumePath,
-                    feedback: resume.feedback
-                };
-            });
-            setResumes(parsedResumes || []);
+            console.log("Loaded KV items:", resumeKVItems);
+            
+            if (!resumeKVItems || resumeKVItems.length === 0) {
+                setResumes([]);
+                return;
+            }
+            
+            const parsedResumes = resumeKVItems.map((item) => {
+                try {
+                    // Skip empty or "deleted" entries
+                    if (!item.value || item.value.trim() === "") {
+                        return null;
+                    }
+                    
+                    const resume = JSON.parse(item.value) as Resume;
+                    return {
+                        id: resume.id,
+                        name: `${resume.companyName || "Resume"} - ${resume.jobTitle || "Application"}`,
+                        companyName: resume.companyName,
+                        jobTitle: resume.jobTitle,
+                        imagePath: resume.imagePath,
+                        resumePath: resume.resumePath,
+                        feedback: resume.feedback
+                    };
+                } catch (parseError) {
+                    console.error("Error parsing resume item:", parseError, item);
+                    return null;
+                }
+            }).filter(Boolean) as ResumeItem[];
+            
+            setResumes(parsedResumes);
+            console.log("Loaded resumes:", parsedResumes);
         } catch (error) {
             console.error("Error loading resumes:", error);
+            setResumes([]);
         } finally {
             setLoadingResumes(false);
         }
@@ -88,24 +109,55 @@ const WipeApp = () => {
         setDeleting(true);
         try {
             const resume = resumes.find(r => r.id === resumeId);
-            if (!resume) return;
-
-            // Delete from KV store
-            await kv.del(`resume:${resumeId}`);
-            
-            // Delete files
-            try {
-                await fs.delete(resume.imagePath);
-                await fs.delete(resume.resumePath);
-            } catch (fileError) {
-                console.warn("Error deleting files:", fileError);
+            if (!resume) {
+                console.error("Resume not found:", resumeId);
+                setDeleting(false);
+                return;
             }
 
-            await loadResumes();
+            console.log("Deleting resume:", resumeId, resume);
+
+            // Delete from KV store first
+            await kv.delete(`resume:${resumeId}`);
+            console.log("Deleted from KV store:", `resume:${resumeId}`);
+            
+            // Delete files (non-blocking)
+            const fileDeletePromises = [];
+            if (resume.imagePath) {
+                fileDeletePromises.push(
+                    fs.delete(resume.imagePath).catch(err => 
+                        console.warn("Error deleting image file:", err)
+                    )
+                );
+            }
+            if (resume.resumePath) {
+                fileDeletePromises.push(
+                    fs.delete(resume.resumePath).catch(err => 
+                        console.warn("Error deleting resume file:", err)
+                    )
+                );
+            }
+            
+            // Wait for file deletions but don't fail if they error
+            await Promise.allSettled(fileDeletePromises);
+
+            // Update local state
+            setResumes(prev => prev.filter(r => r.id !== resumeId));
+            setSelectedResumes(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(resumeId);
+                return newSet;
+            });
+            
+            // Close dialog
             setShowConfirmDialog(false);
             setResumeToDelete(null);
+            
+            console.log("Resume deleted successfully:", resumeId);
         } catch (error) {
             console.error("Error deleting resume:", error);
+            // Reload on error to ensure UI consistency
+            await loadResumes();
         } finally {
             setDeleting(false);
         }
@@ -119,22 +171,39 @@ const WipeApp = () => {
                 if (!resume) continue;
 
                 // Delete from KV store
-                await kv.del(`resume:${resumeId}`);
+                await kv.delete(`resume:${resumeId}`);
+                console.log("Deleted from KV store:", `resume:${resumeId}`);
                 
-                // Delete files
-                try {
-                    await fs.delete(resume.imagePath);
-                    await fs.delete(resume.resumePath);
-                } catch (fileError) {
-                    console.warn("Error deleting files:", fileError);
+                // Delete files (non-blocking)
+                const fileDeletePromises = [];
+                if (resume.imagePath) {
+                    fileDeletePromises.push(
+                        fs.delete(resume.imagePath).catch(err => 
+                            console.warn("Error deleting image file:", err)
+                        )
+                    );
                 }
+                if (resume.resumePath) {
+                    fileDeletePromises.push(
+                        fs.delete(resume.resumePath).catch(err => 
+                            console.warn("Error deleting resume file:", err)
+                        )
+                    );
+                }
+                
+                await Promise.allSettled(fileDeletePromises);
             }
 
-            await loadResumes();
+            // Update local state instead of reloading
+            setResumes(prev => prev.filter(r => !selectedResumes.has(r.id)));
             setSelectedResumes(new Set());
             setShowBulkConfirmDialog(false);
+            
+            console.log("Selected resumes deleted successfully");
         } catch (error) {
             console.error("Error deleting resumes:", error);
+            // Reload on error to ensure UI consistency
+            await loadResumes();
         } finally {
             setDeleting(false);
         }
@@ -145,22 +214,39 @@ const WipeApp = () => {
         try {
             // Delete all resume KV entries
             await kv.flush();
+            console.log("Flushed all KV data");
             
-            // Delete all files
+            // Delete all files (non-blocking)
+            const fileDeletePromises = [];
             for (const resume of resumes) {
-                try {
-                    await fs.delete(resume.imagePath);
-                    await fs.delete(resume.resumePath);
-                } catch (fileError) {
-                    console.warn("Error deleting files:", fileError);
+                if (resume.imagePath) {
+                    fileDeletePromises.push(
+                        fs.delete(resume.imagePath).catch(err => 
+                            console.warn("Error deleting image file:", err)
+                        )
+                    );
+                }
+                if (resume.resumePath) {
+                    fileDeletePromises.push(
+                        fs.delete(resume.resumePath).catch(err => 
+                            console.warn("Error deleting resume file:", err)
+                        )
+                    );
                 }
             }
+            
+            await Promise.allSettled(fileDeletePromises);
 
-            await loadResumes();
+            // Clear local state
+            setResumes([]);
             setSelectedResumes(new Set());
             setShowBulkConfirmDialog(false);
+            
+            console.log("All data wiped successfully");
         } catch (error) {
             console.error("Error wiping all data:", error);
+            // Reload on error to ensure UI consistency
+            await loadResumes();
         } finally {
             setDeleting(false);
         }
@@ -253,7 +339,7 @@ const WipeApp = () => {
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 w-full max-w-[1850px]">
+                        <div className="resumes-section">
                             {resumes.map((resume) => (
                                 <ResumeWipeCard
                                     key={resume.id}
@@ -289,11 +375,16 @@ const WipeApp = () => {
 
             {/* Single Delete Confirmation Dialog */}
             {showConfirmDialog && resumeToDelete && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white rounded-2xl p-8 max-w-md mx-4">
-                        <h3 className="text-2xl font-bold mb-4">Confirm Deletion</h3>
-                        <p className="text-dark-200 mb-6">
-                            Are you sure you want to delete this resume? This action cannot be undone.
+                <div className="fixed inset-0 bg-white/20 backdrop-blur-md flex items-center justify-center z-50 animate-in fade-in duration-300">
+                    <div className="bg-white rounded-2xl p-8 max-w-md mx-4 shadow-2xl border border-gray-100 animate-in zoom-in duration-300">
+                        <div className="flex flex-col items-center gap-4 mb-6">
+                            <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center">
+                                <LucideTrash2 className="h-8 w-8 text-red-500" />
+                            </div>
+                            <h3 className="text-2xl font-bold text-center">Confirm Deletion</h3>
+                        </div>
+                        <p className="text-dark-200 mb-8 text-center leading-relaxed">
+                            Are you sure you want to delete this resume? This action cannot be undone and will permanently remove all associated data.
                         </p>
                         <div className="flex gap-4">
                             <button
@@ -302,14 +393,14 @@ const WipeApp = () => {
                                     setResumeToDelete(null);
                                 }}
                                 disabled={deleting}
-                                className="flex-1 border border-gray-300 text-gray-700 rounded-full px-4 py-2 cursor-pointer disabled:opacity-50"
+                                className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-2xl px-6 py-3 font-medium transition-colors disabled:opacity-50"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={() => handleDeleteSingle(resumeToDelete)}
                                 disabled={deleting}
-                                className="flex-1 bg-red-500 hover:bg-red-600 text-white rounded-full px-4 py-2 cursor-pointer disabled:opacity-50"
+                                className="flex-1 bg-red-500 hover:bg-red-600 text-white rounded-2xl px-6 py-3 font-medium transition-colors disabled:opacity-50 shadow-lg"
                             >
                                 {deleting ? "Deleting..." : "Delete"}
                             </button>
@@ -320,10 +411,19 @@ const WipeApp = () => {
 
             {/* Bulk Delete Confirmation Dialog */}
             {showBulkConfirmDialog && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white rounded-2xl p-8 max-w-md mx-4">
-                        <h3 className="text-2xl font-bold mb-4">Confirm Bulk Deletion</h3>
-                        <p className="text-dark-200 mb-6">
+                <div className="fixed inset-0 bg-white/20 backdrop-blur-md flex items-center justify-center z-50 animate-in fade-in duration-300">
+                    <div className="bg-white rounded-2xl p-8 max-w-md mx-4 shadow-2xl border border-gray-100 animate-in zoom-in duration-300">
+                        <div className="flex flex-col items-center gap-4 mb-6">
+                            <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center">
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                                </svg>
+                            </div>
+                            <h3 className="text-2xl font-bold text-center">
+                                {selectedResumes.size === resumes.length ? "Wipe All Data" : "Confirm Bulk Deletion"}
+                            </h3>
+                        </div>
+                        <p className="text-dark-200 mb-8 text-center leading-relaxed">
                             {selectedResumes.size === resumes.length 
                                 ? "Are you sure you want to wipe ALL application data? This will permanently delete all resumes and cannot be undone."
                                 : `Are you sure you want to delete ${selectedResumes.size} selected resume${selectedResumes.size > 1 ? 's' : ''}? This action cannot be undone.`
@@ -333,14 +433,14 @@ const WipeApp = () => {
                             <button
                                 onClick={() => setShowBulkConfirmDialog(false)}
                                 disabled={deleting}
-                                className="flex-1 border border-gray-300 text-gray-700 rounded-full px-4 py-2 cursor-pointer disabled:opacity-50"
+                                className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-2xl px-6 py-3 font-medium transition-colors disabled:opacity-50"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={selectedResumes.size === resumes.length ? handleDeleteAll : handleDeleteSelected}
                                 disabled={deleting}
-                                className="flex-1 bg-red-500 hover:bg-red-600 text-white rounded-full px-4 py-2 cursor-pointer disabled:opacity-50"
+                                className="flex-1 bg-red-500 hover:bg-red-600 text-white rounded-2xl px-6 py-3 font-medium transition-colors disabled:opacity-50 shadow-lg"
                             >
                                 {deleting ? "Deleting..." : 
                                  selectedResumes.size === resumes.length ? "Wipe All" : "Delete Selected"}
@@ -381,48 +481,48 @@ const ResumeWipeCard = ({ resume, isSelected, onSelect, onDelete, deleting }: Re
     }, [resume.imagePath, fs]);
 
     return (
-        <div className={`flex flex-col gap-4 h-[420px] w-full bg-white rounded-2xl p-4 border-2 transition-all ${
+        <div className={`resume-card border-2 transition-all animate-in fade-in duration-1000 ${
             isSelected ? 'border-blue-500 bg-blue-50' : 'border-transparent'
         }`}>
-            <div className="flex flex-row justify-between items-start">
+            <div className="resume-card-header">
                 <div className="flex flex-col gap-2 flex-1 min-w-0">
-                    {resume.companyName && (
-                        <h3 className="font-bold text-lg break-words">{resume.companyName}</h3>
-                    )}
-                    {resume.jobTitle && (
-                        <p className="text-gray-500 break-words">{resume.jobTitle}</p>
-                    )}
-                    {!resume.companyName && !resume.jobTitle && (
-                        <h3 className="font-bold text-lg">Resume</h3>
-                    )}
+                    {resume.companyName && <h2 className="!text-black font-bold break-words">{resume.companyName}</h2>}
+                    {resume.jobTitle && <h3 className="text-lg break-words text-gray-500">{resume.jobTitle}</h3>}
+                    {!resume.companyName && !resume.jobTitle && <h2 className="!text-black font-bold">Resume</h2>}
                 </div>
-                <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={onSelect}
-                    className="mt-2 w-5 h-5 text-blue-600 cursor-pointer"
-                />
+                <div className="flex items-center gap-3 flex-shrink-0">
+                    <button
+                        onClick={onSelect}
+                        className="p-1 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                        title={isSelected ? "Deselect" : "Select"}
+                    >
+                        {isSelected ? (
+                            <LucideCheck className="h-5 w-5" />
+                        ) : (
+                            <LucideSquare className="h-5 w-5" />
+                        )}
+                    </button>
+                    <button
+                        onClick={onDelete}
+                        disabled={deleting}
+                        className="p-2 text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                        title="Delete this resume"
+                    >
+                        <LucideTrash2 className="h-5 w-5" />
+                    </button>
+                </div>
             </div>
-
             {resumeUrl && (
-                <div className="gradient-border flex-1 animate-in fade-in duration-1000">
+                <div className="gradient-border animate-in fade-in duration-1000">
                     <div className="w-full h-full">
                         <img
                             src={resumeUrl}
-                            alt="resume preview"
-                            className="w-full h-[250px] object-cover object-top rounded-lg"
+                            alt="resume"
+                            className="w-full h-[350px] max-sm:h-[200px] object-cover object-top"
                         />
                     </div>
                 </div>
             )}
-
-            <button
-                onClick={onDelete}
-                disabled={deleting}
-                className="bg-red-500 hover:bg-red-600 text-white rounded-full px-4 py-2 cursor-pointer disabled:opacity-50 mt-auto"
-            >
-                {deleting ? "Deleting..." : "Delete"}
-            </button>
         </div>
     );
 };
